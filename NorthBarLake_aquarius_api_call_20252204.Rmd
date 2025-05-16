@@ -1,0 +1,161 @@
+---
+title: "Aquarius Data Download"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+Download and clean GLKN data from Aquarius.
+Updates 25 July 2023 by Hallie Arno.
+Updated 22 April 2025 by Rick Damstra.
+
+Load required packages.
+```{r}
+library(tidyverse)
+library(lubridate)
+library(jsonlite)
+library(httr)
+library(zoo)
+library(magrittr)
+library(data.table)
+```
+This is the API wrapper file; needed to access the NPS Aquarius API to call data. This file should be saved in the same directory as the R file. Adjust this path as needed.  
+```{r}
+source("M:/Monitoring/Water_Quality/Inland_Lakes/Data/Array_Data/API_data_calls_R/timeseries_client.R")
+```
+
+Function to call and download data from API - returns dataframe with date, one column for each depth, populated with temperature values in degrees C. 
+```{r}
+getdata <- function(loc_list, starttime, endtime){
+  
+  ###Make a note about where timeseries_client.R
+  
+  timeseries$connect("https://aquarius.nps.gov", "aqreadonly", "aqreadonly")
+  
+  # Get data specified in the code block above
+  temps = timeseries$getTimeSeriesData(loc_list,
+                                       queryFrom = starttime, queryTo = endtime)
+  tempsdata <- data.frame(temps[4]) #temps$Points is the same as temps[4]
+  
+  #"Escape" in case df returns empty
+  if(length(tempsdata) > 1){
+    # Extract columns with water temperature data
+    #These contain "NumericValue" in column name
+    data_to_return <- tempsdata[grepl("NumericValue",colnames(tempsdata))]
+    
+    # Rename columns to depth, this is metadata returned from aq in a different df
+    colnames(data_to_return) <- temps$TimeSeries$Label #same as temps[1]
+    
+    # Add date and time column, from df that numeric values were extracted from
+    data_to_return$datetime <- tempsdata$Points.Timestamp ###Combine with next step
+    
+    data_to_return$datetime <- lubridate::as_datetime(data_to_return$datetime)
+    
+    # Return the df with datetime and temp values
+    data_to_return <- data.frame(data_to_return) ###Try removing
+    
+    
+    
+    return(data_to_return)
+    
+  }
+  # Not sure is this is necessary
+  timeseries$disconnect()
+  
+}
+```
+
+Get list of strings to run through getdata function. 
+```{r}
+#List of GLKN array data lakes. If a new array is added a new
+sites <- list("SLBE_09")
+
+#Start time and end time for the function "getdata". Update "endtime" when new data is added. Update "starttime" to limit data calls to certain years  
+starttime <- "2010-01-01"
+endtime <- "2024-12-31"
+
+#The order in depth_list corresponds with nomimal depths available in sites.
+#If a site is changed, added or removed, these will need to be updated. 
+depth_list <- list(
+  c(1.0:9.0))
+
+
+#Makes list of strings
+strlist <- lapply(1:length(sites), function(i) {
+  wts <- paste0("Water Temp.", trimws(format(round(depth_list[[i]], digits = 1))), ".0m_temp_array@SLBE_", sites[[i]])
+  aps <- paste0("Absolute Pressure.", trimws(format(round(depth_list[[i]], digits = 1))), ".0m_pressure_array@SLBE_", sites[[i]])
+  
+  c(wts, aps)
+}) %>% 
+  unlist(.)
+#Exclude specific entries that don't really exist
+exclude_entries <- c("Absolute Pressure.1.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.2.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.3.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.4.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.5.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.6.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.7.0m_pressure_array@SLBE_SLBE_09", 
+                     "Absolute Pressure.8.0m_pressure_array@SLBE_SLBE_09")
+
+strlist <- strlist[!strlist %in% exclude_entries]
+  
+strlist
+```
+```{r}
+
+```
+
+```{r}
+data_all <- lapply(strlist, function(i){
+  dt <- data.table(getdata(i, starttime, endtime)) #Uses function above to call data from Aquarius
+  
+  if(length(dt) > 1){ #To avoid errors from empty dataframes
+    colnames(dt) <- c("temp", "date") #Rename columns
+    dt[,SiteInfo := i]
+    
+    #See progress:
+    print(i)   
+    return(dt)
+  }
+})  %>%
+  rbindlist(., use.names=F, fill=F) #Binds all outputs together 
+
+data_all
+```
+
+
+
+
+```{r}
+data_all <- data_all %>% 
+  mutate(Site = sub('.*@SLBE_', '', SiteInfo)) %>% 
+  mutate(Depth = sub('.*Temp.', '', SiteInfo)) %>% 
+  mutate(Depth = as.numeric(sub('m_temp.*', '', Depth)))
+data_all
+```
+```{r}
+pres_data <- data_all %>% filter(grepl("Pressure", SiteInfo))
+
+data_all <- data_all  %>% filter(!grepl("Pressure", SiteInfo))
+
+pres_data <- pres_data %>% 
+  rename(abs_pres = temp, 
+         before = date)
+
+t <- Sys.Date()
+
+write.csv(data_all, paste0("M:/Monitoring/Water_Quality/Inland_Lakes/Data/Array_Data/API_data_calls_R/Aquarius_Data_Exports/", "slbe_09_temp_aquarius_data_call_", t, ".csv"), row.names = FALSE)
+
+write.csv(pres_data, paste0("M:/Monitoring/Water_Quality/Inland_Lakes/Data/Array_Data/API_data_calls_R/Aquarius_Data_Exports/", "slbe_09_pres_aquarius_data_call_", t, ".csv"), row.names = FALSE)
+
+```
+
